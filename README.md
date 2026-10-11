@@ -50,7 +50,8 @@ Please don't rename these tabs or their header row. You can read them and filter
 ### 2. Prepare the sheet
 1. **M&M App → 1. Set up / repair tabs** (Google will ask you to allow the script the first time).
 2. **M&M App → 2. Create an admin account**: your own username, name and password. You use this to sign in and approve everyone else.
-3. *(Optional)* **M&M App → 4. Import old daily sheets**: copies every old "DAILY CASH FLOW LEDGER" tab into
+3. *(Optional)* **M&M App → 4. Import old daily sheets**: paste the link of the Google Sheet that has your old
+   daily tabs (or leave it empty if they're in this spreadsheet). It copies every "DAILY CASH FLOW LEDGER" tab into
    `Transactions`, sets the opening balances from the first day, and reads the category from the brackets
    in the description, e.g. `LUNCH (FOOD)` → Food. Your old tabs are not changed, and running it again replaces the earlier import.
 4. *(Optional)* **M&M App → 5. Import employees from a salary sheet**: paste the salary sheet's link and the month.

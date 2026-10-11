@@ -1243,7 +1243,8 @@ function importSalarySheet() {
 
 /**
  * Reads every tab laid out like the old "DAILY CASH FLOW LEDGER" sheets and copies their rows into
- * Transactions. Running it again replaces the earlier import, so it is safe to repeat.
+ * Transactions. The old tabs can be in another Google Sheet (paste its link) or in this one.
+ * Running it again replaces the earlier import, so it is safe to repeat.
  *
  * Tabs named "Day1", "Day2", … take their date from the name (in the month of Day1's DATE cell),
  * because copied templates often keep an old date in the DATE cell.
@@ -1251,13 +1252,31 @@ function importSalarySheet() {
 function importLegacySheets() {
   const ui = SpreadsheetApp.getUi();
   ensureTabs_();
-  const plan = planLegacyImport_(readLegacyTabs_(), readSettings_(), readCategories_());
+  const res = ui.prompt('Import old daily sheets',
+    'Paste the link of the Google Sheet that has your old daily tabs (Day1, Day2, …).\n' +
+    'Leave it empty if those tabs are in this spreadsheet.', ui.ButtonSet.OK_CANCEL);
+  if (res.getSelectedButton() !== ui.Button.OK) return;
+  const link = res.getResponseText().trim();
+  let source;
+  try {
+    source = link ? SpreadsheetApp.openByUrl(link) : SpreadsheetApp.getActive();
+  } catch (e) {
+    ui.alert('Could not open that link. Check that it is a Google Sheets link and that you can open it with this Google account.');
+    return;
+  }
+  const scan = readLegacyTabs_(source);
+  const plan = planLegacyImport_(scan.tabs, readSettings_(), readCategories_());
   if (!plan.days.length) {
-    ui.alert('No daily ledger sheets with entries were found.');
+    ui.alert('No daily ledger tabs with entries were found in "' + source.getName() + '".\n\n' +
+      'Checked ' + scan.checked.length + ' tab(s): ' + (scan.checked.join(', ') || 'none') + '.\n\n' +
+      (scan.tabs.length
+        ? 'These look like ledgers but have no amounts yet: ' + scan.tabs.map(t => t.sheet).join(', ') + '.'
+        : 'A ledger tab needs "DAILY CASH FLOW LEDGER" near the top, a header row starting with "SL", and a "TOTAL" row.') +
+      (link ? '' : '\n\nIf your daily tabs are in a different Google Sheet, run this again and paste that sheet\'s link.'));
     return;
   }
   const lines = [
-    'Found ' + plan.days.length + ' day(s) with entries, ' + plan.first + ' to ' + plan.last + ': ' + plan.txns.length + ' entries' +
+    'From "' + source.getName() + '": found ' + plan.days.length + ' day(s) with entries, ' + plan.first + ' to ' + plan.last + ': ' + plan.txns.length + ' entries' +
       (plan.transfers ? ' (including ' + plan.transfers + ' transfer(s) between accounts)' : '') + '.',
   ];
   if (plan.dateFixes.length) lines.push('\nDates taken from the tab name (the DATE cell said otherwise): ' + plan.dateFixes.join(', ') + '.');
@@ -1287,15 +1306,20 @@ function importLegacySheets() {
   ui.alert('Imported ' + plan.txns.length + ' entries. Your old sheets were not changed.');
 }
 
-/** Raw rows of every old-style ledger tab: { sheet, cellDate, rows, totalIn, totalOut }. */
-function readLegacyTabs_() {
+/**
+ * Raw rows of every old-style ledger tab in `ss`: { tabs: [{ sheet, cellDate, rows, totalIn, totalOut }], checked: [tab names] }.
+ */
+function readLegacyTabs_(ss) {
   const tz = tz_();
   const ours = Object.keys(TABS).map(k => TABS[k].name);
   const tabs = [];
-  SpreadsheetApp.getActive().getSheets().forEach(sh => {
+  const checked = [];
+  ss.getSheets().forEach(sh => {
     if (ours.indexOf(sh.getName()) >= 0) return;
+    checked.push(sh.getName());
     const v = sh.getDataRange().getValues();
-    if (!v.some(r => /DAILY CASH FLOW/i.test(String(r[0])))) return;
+    // The title can sit in any of the first columns (merged cells keep their value in the first one).
+    if (!v.slice(0, 15).some(r => r.slice(0, 6).some(c => /DAILY CASH FLOW/i.test(String(c))))) return;
     const headRow = v.findIndex(r => String(r[0]).trim().toUpperCase() === 'SL');
     const dateRow = v.findIndex(r => /^DATE/i.test(String(r[0]).trim()));
     if (headRow < 0) return;
@@ -1312,7 +1336,7 @@ function readLegacyTabs_() {
       totalOut: Number(total[9]) || 0,
     });
   });
-  return tabs;
+  return { tabs: tabs, checked: checked };
 }
 
 /**
