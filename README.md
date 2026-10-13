@@ -15,7 +15,7 @@ Phone / PC browser ──► GitHub Pages (this repo) ──► Apps Script web 
 |---|---|
 | **Daily** | Cash in / cash out / transfers for one day, opening and closing balance, closing balance by account (Cash in hand, Bank, bKash). Print gives the same layout as the old paper ledger. |
 | **Monthly** | Totals for the month, expenses and income by category (click a category to see every entry), day-by-day closing, month-end balance per account, CSV download. |
-| **Profit** | Per invoice: sell price (all cash in with that invoice number, on any date, so instalments add up automatically), cost price (all cash out with it) and gross profit. Prices can be edited by hand (shown as *edited*, with *Reset to auto*). Operating expenses = cash out without an invoice number, by category. Net profit = sell − cost − operating expense, for this month, last month or any date range. An invoice is counted in the period of its first entry. |
+| **Profit** | Per invoice: sell price (all cash in with that invoice number, on any date, so instalments add up automatically), cost price (all cash out with it) and gross profit. Open an invoice to add, edit or delete *invoice-only* cash in / cash out lines: they count for that invoice's prices but are not in the cash book and don't change any balance. Operating expenses = cash out without an invoice number, by category. Net profit = sell − cost − operating expense, for this month, last month or any date range. An invoice is counted in the period of its first entry. |
 | **Inventory** | Parts and consumables with stock level, low-stock warnings, stock in / out / adjust, history. Stock bought or sold can be recorded in the cash book at the same time. |
 | **Salary → Attendance** | Monthly grid of employees × days. Tap a day: P present, A absent, L paid leave, O off/holiday. Weekly off days fill in automatically. |
 | **Salary → Salary sheet** | Basic, present/absent days, absence deduction (worked out automatically), advance, net payable, paid, due. Advances and salary payments are recorded in the cash book too. Printable. |
@@ -37,7 +37,7 @@ from the starting balances plus everything before it, so nothing has to be linke
 | `Employees` | Name, designation, basic salary, joining date, whether attendance is tracked |
 | `Attendance` | One row per employee per marked day: date, status (P/A/H/L/O) |
 | `SalaryPayments` | Advances and salary payments, which month they belong to, and the linked cash-book entry |
-| `InvoiceOverrides` | Sell or cost prices you edited by hand on the Profit page (empty = calculated automatically) |
+| `InvoiceLines` | Invoice-only cash in / cash out lines added on the Profit page (count for that invoice only, not in the cash book) |
 
 Please don't rename these tabs or their header row. You can read them and filter them freely.
 

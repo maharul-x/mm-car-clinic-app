@@ -1,17 +1,19 @@
 import { call } from '../api.js';
-import { can, methodLabel } from '../state.js';
-import { addMonths, esc, fmt, formError, isISO, lastDayOfMonth, loading, openModal, prettyDate, submitting, taka, toast, todayISO } from '../util.js';
-import { loadHistory } from './history.js';
+import { can, categories, methodLabel } from '../state.js';
+import { addMonths, confirmDialog, esc, fmt, formError, isISO, lastDayOfMonth, loading, openModal, options, prettyDate, submitting, taka, toast, todayISO } from '../util.js';
+import { historyList, stampLine } from './history.js';
+import { openTxnForm } from './txnForm.js';
 
 const short = d => prettyDate(d, { day: 'numeric', month: 'short' });
 const range = (from, to) => `${prettyDate(from, { day: 'numeric', month: 'short', year: 'numeric' })} – ${prettyDate(to, { day: 'numeric', month: 'short', year: 'numeric' })}`;
 const signed = n => (n < 0 ? `−${taka(Math.abs(n))}` : taka(n));
 
 /**
- * Profit: per-invoice sell/cost from the cash book (with manual overrides), operating expenses by category,
+ * Profit: per-invoice sell/cost from the cash book plus invoice-only lines, operating expenses by category,
  * and net profit for a date range. #/profit = this month, #/profit/<from>/<to> = any range.
+ * `reopen` is an invoice key whose pop-up should open again after a refresh.
  */
-export async function renderProfit(view, a, b) {
+export async function renderProfit(view, a, b, reopen) {
   const thisMonth = todayISO().slice(0, 7);
   const lastMonth = addMonths(thisMonth, -1);
   const presets = {
@@ -21,12 +23,12 @@ export async function renderProfit(view, a, b) {
   const [from, to] = isISO(a) && isISO(b) && a <= b ? [a, b] : presets.this;
   const preset = from === presets.this[0] && to === presets.this[1] ? 'this'
     : from === presets.last[0] && to === presets.last[1] ? 'last' : 'custom';
-  const refresh = () => renderProfit(view, from, to);
+  const refresh = key => renderProfit(view, from, to, key);
 
   view.innerHTML = loading();
   const d = await call('profit', { from, to });
   const t = d.totals;
-  const edited = d.invoices.filter(i => i.sellEdited || i.costEdited).length;
+  const withLines = d.invoices.filter(i => i.lines).length;
 
   view.innerHTML = `
     <section class="page profit">
@@ -75,16 +77,16 @@ export async function renderProfit(view, a, b) {
                 <td class="nowrap"><strong>${esc(i.invoice)}</strong></td>
                 <td>${esc(i.customer || '—')}</td>
                 <td class="nowrap">${esc(short(i.firstDate))}${i.lastDate !== i.firstDate ? `<small class="muted block">last ${esc(short(i.lastDate))}</small>` : ''}</td>
-                <td class="num">${fmt(i.sell)}${i.sellEdited ? ' <span class="chip edited">edited</span>' : ''}</td>
-                <td class="num">${fmt(i.cost)}${i.costEdited ? ' <span class="chip edited">edited</span>' : ''}</td>
+                <td class="num">${fmt(i.sell)}</td>
+                <td class="num">${fmt(i.cost)}${i.lines ? ` <span class="chip edited" title="Has invoice-only lines">+${i.lines} line${i.lines === 1 ? '' : 's'}</span>` : ''}</td>
                 <td class="num ${i.gross < 0 ? 'neg' : ''}"><strong>${signed(i.gross).replace('৳', '')}</strong></td>
               </tr>`).join('')}</tbody>
             <tfoot><tr><td colspan="3">Total</td><td class="num">${fmt(t.sell)}</td><td class="num">${fmt(t.cost)}</td><td class="num ${t.gross < 0 ? 'neg' : ''}">${signed(t.gross).replace('৳', '')}</td></tr></tfoot>
           </table></div>
           <p class="empty" id="inv-none" hidden>No invoices match your search.</p>`
         : '<p class="empty">No invoices in this period. An invoice appears here when a cash-in or cash-out entry has its invoice number.</p>'}
-        <p class="muted small">An invoice is listed in the period of its first entry. Its sell and cost prices include every payment for that invoice, on any date.
-          ${edited ? `${edited} invoice${edited === 1 ? ' has' : 's have'} a manually edited price.` : ''}</p>
+        <p class="muted small">An invoice is listed in the period of its first entry. Its sell and cost prices include every entry for that invoice, on any date,
+          plus its invoice-only lines${withLines ? ` (${withLines} invoice${withLines === 1 ? ' has' : 's have'} some)` : ''}.</p>
       </div>
 
       <div class="panel">
@@ -166,102 +168,151 @@ export async function renderProfit(view, a, b) {
       open(row);
     }
   };
+  if (reopen && invByKey.has(reopen)) openInvoice({ inv: invByKey.get(reopen), onSaved: refresh });
 }
 
 function card(label, value, kind = '', sub = '', negative = false) {
   return `<div class="card ${kind}"><span>${label}</span><strong class="${negative ? 'neg' : ''}">${value}</strong>${sub ? `<small>${esc(sub)}</small>` : ''}</div>`;
 }
 
-function priceField(name, label, auto, value, isEdited, countLabel, edit) {
-  return `
-    <div class="price-field">
-      <label>${label} (৳)
-        <input name="${name}" type="number" min="0" step="0.01" inputmode="decimal" value="${esc(value)}" ${edit ? '' : 'disabled'}>
-      </label>
-      <p class="muted small">
-        Calculated: <strong>${taka(auto)}</strong> from ${esc(countLabel)}
-        ${isEdited ? `<span class="chip edited">edited</span>${edit ? ` <button type="button" class="link" data-reset="${name}">Reset to auto</button>` : ''}` : ''}
-      </p>
-    </div>`;
-}
-
+/**
+ * One invoice: its sell/cost/gross worked out from its lines, the lines themselves, buttons to add
+ * invoice-only lines, and every change. Cash-book lines open the normal entry form; invoice-only
+ * lines open their own form. After any save the page refreshes and this pop-up opens again.
+ */
 function openInvoice({ inv, onSaved }) {
   const edit = can('profit', 'edit');
-  const ins = inv.entries.filter(e => e.type === 'IN');
-  const outs = inv.entries.filter(e => e.type === 'OUT');
-  const entries = (n, kind) => `${n} ${kind} ${n === 1 ? 'entry' : 'entries'}`;
   const m = openModal({
     title: `Invoice ${inv.invoice}`,
     wide: true,
     body: `
-      <p class="muted">${esc(inv.customer || 'No cash in yet')} · ${esc(short(inv.firstDate))}${inv.lastDate !== inv.firstDate ? ` – ${esc(short(inv.lastDate))}` : ''}
-        ${inv.editedBy ? ` · price edited by <strong>${esc(inv.editedBy)}</strong>` : ''}</p>
-      <form class="form" novalidate>
-        <div class="grid2">
-          ${priceField('sell', 'Sell price', inv.sellAuto, inv.sell, inv.sellEdited, entries(ins.length, 'cash-in'), edit)}
-          ${priceField('cost', 'Cost price', inv.costAuto, inv.cost, inv.costEdited, entries(outs.length, 'cash-out'), edit)}
-        </div>
-        <p class="gross-line">Gross profit: <strong class="${inv.gross < 0 ? 'neg' : ''}" data-gross>${signed(inv.gross)}</strong></p>
-        <p class="form-error" hidden></p>
-        ${edit ? `<div class="actions"><span class="muted small">Change a price to override the calculated value. It stays until you reset it.</span><span class="spacer"></span><button class="btn primary">Save</button></div>` : '<p class="muted small">You can view this invoice but not change its prices.</p>'}
-      </form>
-      <h3 class="sub-title">Entries for this invoice</h3>
+      <p class="muted">${esc(inv.customer || 'No cash in yet')} · ${esc(short(inv.firstDate))}${inv.lastDate !== inv.firstDate ? ` – ${esc(short(inv.lastDate))}` : ''}</p>
+      <div class="cards inv-cards">
+        <div class="card in"><span>Sell price</span><strong>${taka(inv.sell)}</strong></div>
+        <div class="card out"><span>Cost price</span><strong>${taka(inv.cost)}</strong></div>
+        <div class="card"><span>Gross profit</span><strong class="${inv.gross < 0 ? 'neg' : ''}">${signed(inv.gross)}</strong></div>
+      </div>
+      <div class="sub-head">
+        <h3 class="sub-title">Entries for this invoice</h3>
+        ${edit ? `
+          <div class="toolbar-actions">
+            <button type="button" class="btn small in" data-add-line="IN">Add cash in</button>
+            <button type="button" class="btn small out" data-add-line="OUT">Add cash out</button>
+          </div>` : ''}
+      </div>
       <div class="table-wrap"><table class="table">
         <thead><tr><th>Date</th><th>Type</th><th>Description</th><th>Account</th><th class="num">Amount (৳)</th></tr></thead>
-        <tbody>${inv.entries.map(e => `
-          <tr>
-            <td class="nowrap"><a href="#/day/${e.date}" data-close>${esc(short(e.date))}</a></td>
-            <td>${e.type === 'IN' ? 'Cash in' : 'Cash out'}</td>
-            <td>${esc(e.description)}${e.type === 'OUT' && e.category ? ` <span class="chip">${esc(e.category)}</span>` : ''}</td>
-            <td>${esc(methodLabel(e.method))}</td>
-            <td class="num ${e.type === 'OUT' ? '' : 'pos'}">${e.type === 'OUT' ? '−' : '+'}${fmt(e.amount)}</td>
+        <tbody>${inv.entries.map((e, i) => `
+          <tr class="clickable" data-entry="${i}" tabindex="0" title="Open to edit or delete">
+            <td class="nowrap">${esc(short(e.date))}</td>
+            <td class="nowrap">${e.type === 'IN' ? 'Cash in' : 'Cash out'}</td>
+            <td>${esc(e.description)}${e.category ? ` <span class="chip">${esc(e.category)}</span>` : ''}
+              ${e.createdBy ? `<small class="by">by ${esc(e.createdBy)}${e.updatedBy ? ` · edited by ${esc(e.updatedBy)}` : ''}</small>` : ''}</td>
+            <td>${e.source === 'line' ? '<span class="chip edited">Invoice only</span>' : esc(methodLabel(e.method))}</td>
+            <td class="num ${e.type === 'IN' ? 'pos' : ''}">${e.type === 'IN' ? '+' : '−'}${fmt(e.amount)}</td>
           </tr>`).join('')}</tbody>
+        <tfoot><tr><td colspan="4">Gross profit</td><td class="num ${inv.gross < 0 ? 'neg' : ''}">${signed(inv.gross).replace('৳', '')}</td></tr></tfoot>
       </table></div>
-      <details class="history-box"><summary>Price change history</summary><div class="h-body"></div></details>`,
+      <p class="muted small">Invoice-only lines count for this invoice's sell and cost prices but are not in the cash book and don't change any balance.</p>
+      <details class="history-box"><summary>Change history</summary><div class="h-body"></div></details>`,
   });
-  const form = m.el.querySelector('form');
+  const reopen = () => {
+    m.close();
+    onSaved(inv.key);
+  };
   const box = m.el.querySelector('.history-box');
-  box.addEventListener('toggle', () => {
-    if (box.open && !box.dataset.loaded) {
-      box.dataset.loaded = '1';
-      loadHistory(box.querySelector('.h-body'), 'Invoices', inv.key);
+  box.addEventListener('toggle', async () => {
+    if (!box.open || box.dataset.loaded) return;
+    box.dataset.loaded = '1';
+    const body = box.querySelector('.h-body');
+    body.innerHTML = loading('Loading history…');
+    try {
+      body.innerHTML = historyList(await call('invoiceHistory', { invoice: inv.key }), { showSummary: true });
+    } catch (err) {
+      body.innerHTML = `<p class="form-error">${esc(err.message)}</p>`;
     }
   });
-  if (!edit) return;
+  const openEntry = i => {
+    const e = inv.entries[i];
+    if (e.source === 'line') openLineForm({ invoice: inv.key, line: e, onSaved: reopen });
+    else openTxnForm({ txn: e, onSaved: reopen });
+  };
+  m.el.querySelector('.modal-body').addEventListener('click', ev => {
+    const add = ev.target.closest('[data-add-line]');
+    if (add) return openLineForm({ invoice: inv.key, type: add.dataset.addLine, onSaved: reopen });
+    const row = ev.target.closest('[data-entry]');
+    if (row) openEntry(Number(row.dataset.entry));
+  });
+  m.el.querySelector('.modal-body').addEventListener('keydown', ev => {
+    const row = ev.target.closest('[data-entry]');
+    if (row && (ev.key === 'Enter' || ev.key === ' ')) {
+      ev.preventDefault();
+      openEntry(Number(row.dataset.entry));
+    }
+  });
+}
 
-  const grossEl = form.querySelector('[data-gross]');
-  form.oninput = () => {
-    const s = Number(form.elements.sell.value || inv.sellAuto);
-    const c = Number(form.elements.cost.value || inv.costAuto);
-    grossEl.textContent = signed(s - c);
-    grossEl.classList.toggle('neg', s - c < 0);
-  };
-  const save = async payload => {
-    const ok = await submitting(form, () => call('saveInvoiceOverride', { invoice: inv.key, ...payload }));
-    if (!ok) return;
-    m.close();
-    onSaved();
-  };
+/** Add, edit or delete an invoice-only line. View-only users see it read-only. */
+function openLineForm({ invoice, type, line, onSaved }) {
+  const edit = can('profit', 'edit');
+  const editing = !!line;
+  const l = line || { type, date: todayISO(), category: '' };
+  const cats = [...categories(l.type)];
+  if (l.category && !cats.includes(l.category)) cats.push(l.category);
+  const kind = l.type === 'IN' ? 'cash in' : 'cash out';
+  const m = openModal({
+    title: `${editing ? (edit ? 'Edit' : '') : 'Add'} invoice-only ${kind} · ${invoice}`.replace(/^ /, ''),
+    body: `
+      ${editing ? stampLine(l) : ''}
+      <form class="form" novalidate>
+        <fieldset class="plain" ${edit ? '' : 'disabled'}>
+          <label>Description<input name="description" maxlength="200" required autofocus value="${esc(l.description || '')}"
+            placeholder="${l.type === 'IN' ? 'e.g. Labour charge' : 'e.g. Parts, tyre work'}"></label>
+          <div class="grid2">
+            <label>Amount (৳)<input name="amount" type="number" min="0" step="0.01" inputmode="decimal" required value="${esc(l.amount ?? '')}"></label>
+            <label>Category
+              <select name="category">
+                <option value="" ${l.category ? '' : 'selected'}>${l.type === 'IN' ? 'Customer Payment' : 'Uncategorized'}</option>
+                ${options(cats.filter(c => c !== (l.type === 'IN' ? 'Customer Payment' : 'Uncategorized')), l.category)}
+              </select>
+            </label>
+          </div>
+          <div class="grid2">
+            <label>Date<input type="date" name="date" required value="${esc(l.date)}"></label>
+            <label>Note (optional)<input name="note" maxlength="300" value="${esc(l.note || '')}"></label>
+          </div>
+        </fieldset>
+        <p class="muted small">Counts for invoice ${esc(invoice)} only. It won't appear in the cash book or change any balance.</p>
+        <p class="form-error" hidden></p>
+        ${edit ? `
+        <div class="actions">
+          ${editing ? '<button type="button" class="btn danger ghost" data-delete>Delete</button><span class="spacer"></span>' : ''}
+          <button class="btn primary">Save</button>
+        </div>` : ''}
+      </form>`,
+  });
+  if (!edit) return;
+  const form = m.el.querySelector('form');
   form.addEventListener('submit', async e => {
     e.preventDefault();
-    // A field left empty, or equal to the calculated value while not overridden, stays automatic.
-    const value = (name, auto, wasEdited) => {
-      const raw = form.elements[name].value.trim();
-      if (raw === '') return null;
-      const n = Number(raw);
-      return !wasEdited && n === auto ? null : n;
-    };
-    const sell = value('sell', inv.sellAuto, inv.sellEdited);
-    const cost = value('cost', inv.costAuto, inv.costEdited);
-    if ((sell !== null && !(sell >= 0)) || (cost !== null && !(cost >= 0))) return formError(form, 'Prices cannot be negative.');
-    await save({ sell, cost });
-    toast('Invoice prices saved');
+    const v = Object.fromEntries(new FormData(form));
+    const amount = Number(v.amount);
+    if (!v.description.trim()) return formError(form, 'Enter a description.');
+    if (!(amount > 0)) return formError(form, 'Enter an amount greater than 0.');
+    if (!v.date) return formError(form, 'Choose a date.');
+    const ok = await submitting(form, () => call('saveInvoiceLine', { line: { ...l, ...v, invoice, type: l.type, amount } }));
+    if (!ok) return;
+    toast(editing ? 'Line updated' : 'Line added');
+    m.close();
+    onSaved();
   });
-  form.querySelectorAll('[data-reset]').forEach(btn => {
-    btn.onclick = async () => {
-      await save({ [btn.dataset.reset]: null });
-      toast(`${btn.dataset.reset === 'sell' ? 'Sell' : 'Cost'} price back to automatic`);
-    };
+  form.querySelector('[data-delete]')?.addEventListener('click', async () => {
+    if (!(await confirmDialog(`Delete "${l.description}" (${taka(l.amount)}) from invoice ${invoice}?`))) return;
+    const ok = await submitting(form, () => call('deleteInvoiceLine', { id: l.id }));
+    if (!ok) return;
+    toast('Line deleted');
+    m.close();
+    onSaved();
   });
 }
 

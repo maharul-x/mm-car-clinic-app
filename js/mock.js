@@ -1,7 +1,7 @@
 // In-browser stand-in for the Apps Script server, used by "Try the demo".
 // Data lives in this browser only. The sample data is made up.
 
-const KEY = 'mm.demo.v10';
+const KEY = 'mm.demo.v11';
 let db = null;
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -351,7 +351,8 @@ const RULES = {
   salaryMonth: [['attendance', 'salary'], 'view'],
   saveAttendance: [['attendance'], 'edit'],
   addSalaryPayment: [['salary'], 'edit'], deleteSalaryPayment: [['salary'], 'edit'],
-  profit: [['profit'], 'view'], saveInvoiceOverride: [['profit'], 'edit'],
+  profit: [['profit'], 'view'], invoiceHistory: [['profit'], 'view'],
+  saveInvoiceLine: [['profit'], 'edit'], deleteInvoiceLine: [['profit'], 'edit'],
 };
 const ENTITY_SECTION = {
   Transactions: 'cash', Inventory: 'inventory', StockMoves: 'inventory', Employees: 'employees',
@@ -565,21 +566,25 @@ Object.assign(handlers, {
 
 const invoiceKey = v => String(v ?? '').trim().toUpperCase().replace(/\s+/g, '');
 
-function computeProfit(txns, overrides, from, to) {
+function computeProfit(txns, lines, from, to) {
   const inv = {};
   const opex = {};
   let unlinkedIn = 0;
+  const addTo = (key, label, e) => {
+    const r = inv[key] ||= { key, invoice: label, firstDate: e.date, lastDate: e.date, sell: 0, cost: 0, customer: '', entries: [] };
+    if (e.date < r.firstDate) r.firstDate = e.date;
+    if (e.date > r.lastDate) r.lastDate = e.date;
+    if (e.type === 'IN') {
+      r.sell += e.amount;
+      if (!r.customer && e.source === 'cash') r.customer = e.description;
+    } else r.cost += e.amount;
+    r.entries.push(e);
+  };
   [...txns].sort((a, b) => a.date.localeCompare(b.date)).forEach(t => {
     if (t.type !== 'IN' && t.type !== 'OUT') return;
     const key = invoiceKey(t.invoice);
     if (key) {
-      const r = inv[key] ||= { key, invoice: String(t.invoice).trim(), firstDate: t.date, lastDate: t.date, sellAuto: 0, costAuto: 0, customer: '', entries: [] };
-      if (t.date > r.lastDate) r.lastDate = t.date;
-      if (t.type === 'IN') {
-        r.sellAuto += t.amount;
-        r.customer ||= t.description;
-      } else r.costAuto += t.amount;
-      r.entries.push({ id: t.id, date: t.date, type: t.type, description: t.description, category: t.category, amount: t.amount, method: t.method });
+      addTo(key, String(t.invoice).trim(), { source: 'cash', ...t });
       return;
     }
     if (t.date < from || t.date > to) return;
@@ -591,18 +596,18 @@ function computeProfit(txns, overrides, from, to) {
       g.entries.push({ id: t.id, date: t.date, description: t.description, amount: t.amount, method: t.method });
     }
   });
+  [...lines].sort((a, b) => a.date.localeCompare(b.date)).forEach(l => {
+    if (l.invoice && (l.type === 'IN' || l.type === 'OUT')) addTo(l.invoice, l.invoice, { source: 'line', ...l });
+  });
   const round = n => Math.round(n * 100) / 100;
   const invoices = Object.values(inv)
     .filter(r => r.firstDate >= from && r.firstDate <= to)
     .map(r => {
-      const o = overrides[r.key] || {};
-      const sellEdited = o.sell !== null && o.sell !== undefined;
-      const costEdited = o.cost !== null && o.cost !== undefined;
-      r.sellAuto = round(r.sellAuto);
-      r.costAuto = round(r.costAuto);
-      r.sell = sellEdited ? o.sell : r.sellAuto;
-      r.cost = costEdited ? o.cost : r.costAuto;
-      Object.assign(r, { sellEdited, costEdited, gross: round(r.sell - r.cost), editedBy: sellEdited || costEdited ? o.updatedBy || '' : '' });
+      r.sell = round(r.sell);
+      r.cost = round(r.cost);
+      r.gross = round(r.sell - r.cost);
+      r.lines = r.entries.filter(e => e.source === 'line').length;
+      r.entries.sort((a, b) => a.date.localeCompare(b.date) || (a.type === b.type ? 0 : a.type === 'IN' ? -1 : 1));
       return r;
     })
     .sort((a, b) => b.firstDate.localeCompare(a.firstDate) || a.invoice.localeCompare(b.invoice));
@@ -614,29 +619,45 @@ function computeProfit(txns, overrides, from, to) {
   return { from, to, invoices, opex: categories, unlinkedIn: round(unlinkedIn), totals };
 }
 
+const lineLabel = l => `Invoice ${l.invoice} · invoice-only ${l.type === 'IN' ? 'cash in' : 'cash out'}: ${l.description} ৳${l.amount}`;
+
 Object.assign(handlers, {
   profit: ({ from, to }) => {
     const s = settings();
-    return computeProfit(db.txns.filter(t => !s.startDate || t.date >= s.startDate), db.invoiceOverrides ||= {}, from, to);
+    return computeProfit(db.txns.filter(t => !s.startDate || t.date >= s.startDate), db.invoiceLines ||= [], from, to);
   },
-  saveInvoiceOverride: req => {
-    const key = invoiceKey(req.invoice);
-    if (!key) throw new Error('Invalid invoice number.');
-    const all = db.invoiceOverrides ||= {};
-    const old = all[key] || { sell: null, cost: null };
-    const parse = v => {
-      if (v === null || v === undefined || v === '') return null;
-      const n = r2(v);
-      if (!(n >= 0)) throw new Error('Prices cannot be negative.');
-      return n;
+  saveInvoiceLine: ({ line: x }) => {
+    const lines = db.invoiceLines ||= [];
+    const l = {
+      id: x.id || '', invoice: invoiceKey(x.invoice), date: String(x.date || ''), type: String(x.type).toUpperCase(),
+      description: String(x.description || '').trim(), category: String(x.category || ''), amount: r2(x.amount), note: String(x.note || ''),
     };
-    const next = { sell: 'sell' in req ? parse(req.sell) : old.sell, cost: 'cost' in req ? parse(req.cost) : old.cost };
-    if (next.sell === null && next.cost === null) delete all[key];
-    else all[key] = { ...next, updatedBy: me().name, updatedAt: localStamp() };
-    const label = v => (v === null ? 'auto' : v);
-    audit('edit', 'Invoices', key, `Invoice ${key}: sell ${label(next.sell)}, cost ${label(next.cost)}`,
-      { sell: label(old.sell), cost: label(old.cost) }, { sell: label(next.sell), cost: label(next.cost) });
-    return { invoice: key, ...next };
+    if (!l.invoice) throw new Error('Invalid invoice number.');
+    if (!(l.amount > 0)) throw new Error('Amount must be more than 0.');
+    if (!l.description) throw new Error('Description is required.');
+    l.category ||= l.type === 'IN' ? 'Customer Payment' : 'Uncategorized';
+    if (l.id) {
+      const i = find(lines, l.id);
+      const old = { ...lines[i] };
+      lines[i] = { ...old, ...l, updatedBy: me().name, updatedAt: localStamp() };
+      audit('edit', 'Invoices', l.invoice, lineLabel(l), old, lines[i]);
+    } else {
+      Object.assign(l, { id: uid(), createdBy: me().name, createdAt: localStamp(), updatedBy: '' });
+      lines.push(l);
+      audit('add', 'Invoices', l.invoice, lineLabel(l), null, l);
+    }
+    return { id: l.id };
+  },
+  deleteInvoiceLine: ({ id }) => {
+    const lines = db.invoiceLines ||= [];
+    const [old] = lines.splice(find(lines, id), 1);
+    audit('delete', 'Invoices', old.invoice, `Deleted ${lineLabel(old)}`, old, null);
+    return { deleted: true };
+  },
+  invoiceHistory: ({ invoice }) => {
+    const key = invoiceKey(invoice);
+    const ids = new Set(db.txns.filter(t => invoiceKey(t.invoice) === key).map(t => t.id));
+    return db.audit.filter(a => (a.entity === 'Invoices' && a.recordId === key) || (a.entity === 'Transactions' && ids.has(a.recordId))).slice().reverse();
   },
 });
 

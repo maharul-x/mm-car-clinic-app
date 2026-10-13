@@ -19,7 +19,7 @@ const TABS = {
   PAY: { name: 'SalaryPayments', headers: ['id', 'date', 'employeeId', 'month', 'type', 'amount', 'method', 'note', 'txnId', 'source', 'createdAt', 'createdBy'] },
   USER: { name: 'Users', headers: ['id', 'username', 'name', 'passHash', 'status', 'isAdmin', 'perms', 'createdAt', 'approvedBy', 'lastLogin', 'sessionsFrom'] },
   AUDIT: { name: 'ChangeLog', headers: ['id', 'at', 'user', 'action', 'entity', 'recordId', 'summary', 'before', 'after'] },
-  INVOICE: { name: 'InvoiceOverrides', headers: ['invoice', 'sell', 'cost', 'updatedAt', 'updatedBy'] },
+  INVLINE: { name: 'InvoiceLines', headers: ['id', 'invoice', 'date', 'type', 'description', 'category', 'amount', 'note', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy'] },
 };
 
 const DEFAULT_SETTINGS = {
@@ -181,12 +181,14 @@ const API = {
   saveAttendance: req => saveAttendance_(req.records),
   addSalaryPayment: req => addSalaryPayment_(req),
   profit: req => profit_(req),
-  saveInvoiceOverride: req => saveInvoiceOverride_(req),
+  saveInvoiceLine: req => saveInvoiceLine_(req.line),
+  deleteInvoiceLine: req => deleteInvoiceLine_(req.id),
+  invoiceHistory: req => invoiceHistory_(req),
   deleteSalaryPayment: req => deleteSalaryPayment_(req.id),
 };
 const WRITES = ['addTxn', 'updateTxn', 'deleteTxn', 'saveSettings', 'saveCategories', 'saveItem', 'deleteItem', 'addMove', 'deleteMove',
   'saveEmployee', 'deleteEmployee', 'saveAttendance', 'addSalaryPayment', 'deleteSalaryPayment',
-  'signup', 'changePassword', 'updateUser', 'resetPassword', 'saveInvoiceOverride'];
+  'signup', 'changePassword', 'updateUser', 'resetPassword', 'saveInvoiceLine', 'deleteInvoiceLine'];
 
 // Actions anyone can call without signing in.
 const PUBLIC = ['ping', 'login', 'signup'];
@@ -205,7 +207,8 @@ const RULES = {
   salaryMonth: [['attendance', 'salary'], 'view'],
   saveAttendance: [['attendance'], 'edit'],
   addSalaryPayment: [['salary'], 'edit'], deleteSalaryPayment: [['salary'], 'edit'],
-  profit: [['profit'], 'view'], saveInvoiceOverride: [['profit'], 'edit'],
+  profit: [['profit'], 'view'], invoiceHistory: [['profit'], 'view'],
+  saveInvoiceLine: [['profit'], 'edit'], deleteInvoiceLine: [['profit'], 'edit'],
 };
 
 function doGet() {
@@ -1251,14 +1254,12 @@ function invoiceKey_(v) {
   return String(v === undefined || v === null ? '' : v).trim().toUpperCase().replace(/\s+/g, '');
 }
 
-/** Manual sell/cost prices per invoice: { KEY: { sell, cost, updatedBy, updatedAt } }; null = use the calculated value. */
-function readOverrides_() {
-  const out = {};
-  readRows_(TABS.INVOICE).forEach(r => {
-    const num = v => (v === '' || v === null || v === undefined ? null : Number(v));
-    out[invoiceKey_(r.invoice)] = { sell: num(r.sell), cost: num(r.cost), updatedBy: String(r.updatedBy || ''), updatedAt: String(r.updatedAt || ''), _row: r._row };
-  });
-  return out;
+function cleanLine_(r) {
+  return {
+    id: String(r.id), invoice: invoiceKey_(r.invoice), date: String(r.date).slice(0, 10), type: String(r.type).toUpperCase(),
+    description: String(r.description), category: String(r.category), amount: Number(r.amount) || 0, note: String(r.note),
+    createdAt: String(r.createdAt), updatedAt: String(r.updatedAt), createdBy: String(r.createdBy || ''), updatedBy: String(r.updatedBy || ''),
+  };
 }
 
 function profit_(req) {
@@ -1266,33 +1267,41 @@ function profit_(req) {
   if (!isDate_(from) || !isDate_(to) || from > to) throw new Error('Invalid date range.');
   const s = readSettings_();
   const txns = readRows_(TABS.TXN).map(cleanTxn_).filter(t => !s.startDate || t.date >= s.startDate);
-  return computeProfit_(txns, readOverrides_(), from, to);
+  return computeProfit_(txns, readRows_(TABS.INVLINE).map(cleanLine_), from, to);
 }
 
 /**
  * Pure profit maths (also copied into js/mock.js for the demo).
- * - Sell price of an invoice = all cash in with that invoice number, on any date; cost price = all cash out with it.
- * - An invoice belongs to the range that contains its first entry, so instalments never split it across months.
+ * - Sell price of an invoice = its cash-in entries (any date) + its invoice-only "cash in" lines;
+ *   cost price = its cash-out entries + its invoice-only "cash out" lines.
+ * - Invoice-only lines live in the InvoiceLines tab: they count for the invoice but never touch the cash book.
+ * - An invoice belongs to the range that contains its first entry or line, so instalments never split it.
  * - Operating expense = cash out with no invoice number, dated inside the range, grouped by category.
  * - Net profit = total sell − total cost − operating expense. Transfers are ignored.
  */
-function computeProfit_(txns, overrides, from, to) {
+function computeProfit_(txns, lines, from, to) {
   const inv = {};
   const opex = {};
   let unlinkedIn = 0;
+  const addTo = (key, label, e) => {
+    const r = inv[key] || (inv[key] = { key: key, invoice: label, firstDate: e.date, lastDate: e.date, sell: 0, cost: 0, customer: '', entries: [] });
+    if (e.date < r.firstDate) r.firstDate = e.date;
+    if (e.date > r.lastDate) r.lastDate = e.date;
+    if (e.type === 'IN') {
+      r.sell += e.amount;
+      if (!r.customer && e.source === 'cash') r.customer = e.description;
+    } else r.cost += e.amount;
+    r.entries.push(e);
+  };
   txns.slice().sort((a, b) => a.date.localeCompare(b.date)).forEach(t => {
     if (t.type !== 'IN' && t.type !== 'OUT') return;
     const key = invoiceKey_(t.invoice);
     if (key) {
-      const r = inv[key] || (inv[key] = { key: key, invoice: String(t.invoice).trim(), firstDate: t.date, lastDate: t.date, sellAuto: 0, costAuto: 0, customer: '', entries: [] });
-      if (t.date > r.lastDate) r.lastDate = t.date;
-      if (t.type === 'IN') {
-        r.sellAuto += t.amount;
-        if (!r.customer) r.customer = t.description;
-      } else {
-        r.costAuto += t.amount;
-      }
-      r.entries.push({ id: t.id, date: t.date, type: t.type, description: t.description, category: t.category, amount: t.amount, method: t.method });
+      addTo(key, String(t.invoice).trim(), {
+        source: 'cash', id: t.id, date: t.date, type: t.type, invoice: t.invoice, description: t.description, category: t.category,
+        amount: t.amount, method: t.method, toMethod: t.toMethod, note: t.note,
+        createdAt: t.createdAt, updatedAt: t.updatedAt, createdBy: t.createdBy, updatedBy: t.updatedBy,
+      });
       return;
     }
     if (t.date < from || t.date > to) return;
@@ -1304,21 +1313,19 @@ function computeProfit_(txns, overrides, from, to) {
       g.entries.push({ id: t.id, date: t.date, description: t.description, amount: t.amount, method: t.method });
     }
   });
+  lines.slice().sort((a, b) => a.date.localeCompare(b.date)).forEach(l => {
+    if (!l.invoice || (l.type !== 'IN' && l.type !== 'OUT')) return;
+    addTo(l.invoice, l.invoice, Object.assign({ source: 'line' }, l));
+  });
   const round = n => Math.round(n * 100) / 100;
   const invoices = Object.keys(inv).map(k => inv[k])
     .filter(r => r.firstDate >= from && r.firstDate <= to)
     .map(r => {
-      const o = overrides[r.key] || {};
-      const sellEdited = o.sell !== null && o.sell !== undefined;
-      const costEdited = o.cost !== null && o.cost !== undefined;
-      r.sellAuto = round(r.sellAuto);
-      r.costAuto = round(r.costAuto);
-      r.sell = sellEdited ? o.sell : r.sellAuto;
-      r.cost = costEdited ? o.cost : r.costAuto;
-      r.sellEdited = sellEdited;
-      r.costEdited = costEdited;
+      r.sell = round(r.sell);
+      r.cost = round(r.cost);
       r.gross = round(r.sell - r.cost);
-      r.editedBy = sellEdited || costEdited ? o.updatedBy || '' : '';
+      r.lines = r.entries.filter(e => e.source === 'line').length;
+      r.entries.sort((a, b) => a.date.localeCompare(b.date) || (a.type === b.type ? 0 : a.type === 'IN' ? -1 : 1));
       return r;
     })
     .sort((a, b) => b.firstDate.localeCompare(a.firstDate) || a.invoice.localeCompare(b.invoice));
@@ -1334,34 +1341,71 @@ function computeProfit_(txns, overrides, from, to) {
   return { from: from, to: to, invoices: invoices, opex: categories, unlinkedIn: round(unlinkedIn), totals: totals };
 }
 
-/** Sets or clears (null) the manual sell/cost price of one invoice. */
-function saveInvoiceOverride_(req) {
-  const key = invoiceKey_(req.invoice);
-  if (!key || key.length > 40) throw new Error('Invalid invoice number.');
-  const parse = (v, label) => {
-    if (v === null || v === undefined || v === '') return null;
-    const n = num_(v);
-    if (!(n >= 0)) throw new Error(label + ' cannot be negative.');
-    return n;
+function lineLabel_(l) {
+  return 'Invoice ' + l.invoice + ' · invoice-only ' + (l.type === 'IN' ? 'cash in' : 'cash out') + ': ' + l.description + ' ৳' + l.amount;
+}
+
+/** Adds or edits an invoice-only line (it counts for the invoice's sell/cost but not in the cash book). */
+function saveInvoiceLine_(x) {
+  x = x || {};
+  const l = {
+    id: str_(x.id, 64), invoice: invoiceKey_(x.invoice), date: str_(x.date, 10), type: str_(x.type, 10).toUpperCase(),
+    description: str_(x.description, 200), category: str_(x.category, 60), amount: num_(x.amount), note: str_(x.note, 300),
   };
-  const all = readOverrides_();
-  const old = all[key] || { sell: null, cost: null };
-  const next = {
-    sell: 'sell' in req ? parse(req.sell, 'Sell price') : old.sell,
-    cost: 'cost' in req ? parse(req.cost, 'Cost price') : old.cost,
-  };
-  const sh = sheet_(TABS.INVOICE);
-  if (next.sell === null && next.cost === null) {
-    if (old._row) sh.deleteRow(old._row);
+  if (!l.invoice || l.invoice.length > 40) throw new Error('Invalid invoice number.');
+  if (!isDate_(l.date)) throw new Error('Choose a valid date.');
+  if (l.type !== 'IN' && l.type !== 'OUT') throw new Error('Choose cash in or cash out.');
+  if (!l.description) throw new Error('Description is required.');
+  if (!(l.amount > 0)) throw new Error('Amount must be more than 0.');
+  if (!l.category) l.category = l.type === 'IN' ? 'Customer Payment' : 'Uncategorized';
+  const sh = sheet_(TABS.INVLINE);
+  const now = new Date();
+  if (l.id) {
+    const row = findRow_(TABS.INVLINE, l.id);
+    const old = cleanLine_(readRow_(TABS.INVLINE, row));
+    l.createdAt = old.createdAt;
+    l.createdBy = old.createdBy;
+    l.updatedAt = now;
+    l.updatedBy = actorName_();
+    sh.getRange(row, 1, 1, TABS.INVLINE.headers.length).setValues([toRow_(TABS.INVLINE, l)]);
+    audit_('edit', 'Invoices', l.invoice, lineLabel_(l), old, l);
+    if (old.invoice !== l.invoice) audit_('edit', 'Invoices', old.invoice, 'Moved to invoice ' + l.invoice + ': ' + l.description, old, l);
   } else {
-    const row = toRow_(TABS.INVOICE, { invoice: key, sell: next.sell === null ? '' : next.sell, cost: next.cost === null ? '' : next.cost, updatedAt: new Date(), updatedBy: actorName_() });
-    if (old._row) sh.getRange(old._row, 1, 1, row.length).setValues([row]);
-    else sh.appendRow(row);
+    l.id = Utilities.getUuid();
+    l.createdAt = now;
+    l.updatedAt = now;
+    l.createdBy = actorName_();
+    l.updatedBy = '';
+    sh.appendRow(toRow_(TABS.INVLINE, l));
+    audit_('add', 'Invoices', l.invoice, lineLabel_(l), null, l);
   }
-  const label = v => (v === null ? 'auto' : v);
-  audit_('edit', 'Invoices', key, 'Invoice ' + key + ': sell ' + label(next.sell) + ', cost ' + label(next.cost),
-    { sell: label(old.sell), cost: label(old.cost) }, { sell: label(next.sell), cost: label(next.cost) });
-  return { invoice: key, sell: next.sell, cost: next.cost };
+  return { id: l.id };
+}
+
+function deleteInvoiceLine_(id) {
+  const row = findRow_(TABS.INVLINE, id);
+  const old = cleanLine_(readRow_(TABS.INVLINE, row));
+  sheet_(TABS.INVLINE).deleteRow(row);
+  audit_('delete', 'Invoices', old.invoice, 'Deleted ' + lineLabel_(old), old, null);
+  return { deleted: true };
+}
+
+/** Every change to an invoice: its invoice-only lines and its cash-book entries, newest first. */
+function invoiceHistory_(req) {
+  const key = invoiceKey_(req.invoice);
+  if (!key) throw new Error('Invalid invoice number.');
+  const ids = readRows_(TABS.TXN).filter(t => invoiceKey_(t.invoice) === key).map(t => String(t.id));
+  const sh = sheet_(TABS.AUDIT);
+  const n = sh.getLastRow() - 1;
+  if (n < 1) return [];
+  const col = sh.getRange(2, TABS.AUDIT.headers.indexOf('recordId') + 1, n, 1);
+  const rows = {};
+  [key].concat(ids).forEach(id => {
+    col.createTextFinder(id).matchEntireCell(true).findAll().forEach(c => { rows[c.getRow()] = true; });
+  });
+  return Object.keys(rows).map(Number).sort((a, b) => b - a)
+    .map(row => cleanAudit_(readRow_(TABS.AUDIT, row)))
+    .filter(a => (a.entity === 'Invoices' && a.recordId === key) || (a.entity === 'Transactions' && ids.indexOf(a.recordId) >= 0));
 }
 
 // ───────────────────────────── Import old daily sheets ─────────────────────────────
