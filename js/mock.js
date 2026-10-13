@@ -1,7 +1,7 @@
 // In-browser stand-in for the Apps Script server, used by "Try the demo".
 // Data lives in this browser only. The sample data is made up.
 
-const KEY = 'mm.demo.v8';
+const KEY = 'mm.demo.v10';
 let db = null;
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -20,7 +20,8 @@ function laterDays() {
     out.push(row('IN', `SAMPLE CUSTOMER ${String.fromCharCode(67 + d)}`, 4000 + k * 1500, k % 3 ? 'Cash' : 'Bank', 'Customer Payment'));
     if (k % 2) out.push(row('IN', 'SAMPLE WALK-IN SERVICE', 1500 + k * 300, 'Bkash', 'Customer Payment'));
     out.push(row('OUT', 'LUNCH (FOOD)', 550 + (k % 4) * 40, 'Cash', 'Food'));
-    if (k > 4) out.push(row('OUT', 'PARTS PURCHASE', 2500 + k * 600, 'Cash', 'Parts Purchase'));
+    if (k > 4) out.push({ ...row('OUT', 'PARTS FOR JOB', 1500 + k * 350, 'Cash', 'Invoice'), invoice: `INV-0010${String(d).padStart(2, '0')}` });
+    if (d === 7) out.push({ ...row('IN', 'SAMPLE CUSTOMER C (2ND PAYMENT)', 2500, 'Bkash', 'Customer Payment'), invoice: 'INV-000903' });
   }
   return out;
 }
@@ -76,9 +77,9 @@ function seed() {
       OUT: ['Food', 'Salary', 'Workshop', 'Parts Purchase', 'Vendor Payment', 'Commission', 'Utility', 'Invoice', 'Rent', 'Transport', 'Other'],
     },
     txns: [
-      t('IN', 'INV-001001', 'SAMPLE CUSTOMER A', 3500, 'Cash', 'Customer Payment'),
-      t('IN', 'INV-001002', 'SAMPLE CUSTOMER B', 18000, 'Bank', 'Customer Payment'),
-      t('IN', 'INV-001003', 'SAMPLE CUSTOMER C', 1200, 'Bkash', 'Customer Payment'),
+      t('IN', 'INV-000901', 'SAMPLE CUSTOMER A', 3500, 'Cash', 'Customer Payment'),
+      t('IN', 'INV-000902', 'SAMPLE CUSTOMER B', 18000, 'Bank', 'Customer Payment'),
+      t('IN', 'INV-000903', 'SAMPLE CUSTOMER C', 1200, 'Bkash', 'Customer Payment'),
       t('OUT', '', 'BREAKFAST (FOOD)', 200, 'Cash', 'Food'),
       t('OUT', 'PO-0501', 'PARTS SUPPLIER', 7500, 'Cash', 'Uncategorized'),
       t('OUT', '', 'CLEANING SUPPLIES (WORKSHOP)', 150, 'Cash', 'Workshop'),
@@ -335,7 +336,7 @@ Object.assign(handlers, {
 
 // ───────────── Demo users, permissions and change log (mirrors Code.gs) ─────────────
 
-const SECTIONS = ['cash', 'report', 'inventory', 'attendance', 'salary', 'employees', 'settings'];
+const SECTIONS = ['cash', 'report', 'profit', 'inventory', 'attendance', 'salary', 'employees', 'settings'];
 const RANK = { none: 0, view: 1, edit: 2 };
 const RULES = {
   me: 'any', logout: 'any', changePassword: 'any', meta: 'any', history: 'any', ping: 'any',
@@ -350,10 +351,12 @@ const RULES = {
   salaryMonth: [['attendance', 'salary'], 'view'],
   saveAttendance: [['attendance'], 'edit'],
   addSalaryPayment: [['salary'], 'edit'], deleteSalaryPayment: [['salary'], 'edit'],
+  profit: [['profit'], 'view'], saveInvoiceOverride: [['profit'], 'edit'],
 };
 const ENTITY_SECTION = {
   Transactions: 'cash', Inventory: 'inventory', StockMoves: 'inventory', Employees: 'employees',
   Attendance: 'attendance', SalaryPayments: 'salary', Settings: 'settings', Categories: 'settings', Users: 'admin',
+  Invoices: 'profit',
 };
 
 const pad2 = n => String(n).padStart(2, '0');
@@ -555,6 +558,85 @@ Object.assign(handlers, {
   employees: p => {
     const list = base.employees(p);
     return canDo(me(), ['salary', 'employees'], 'view') ? list : list.map(({ basicSalary, ...e }) => e);
+  },
+});
+
+// ───────────── Profit (same maths as computeProfit_ in Code.gs) ─────────────
+
+const invoiceKey = v => String(v ?? '').trim().toUpperCase().replace(/\s+/g, '');
+
+function computeProfit(txns, overrides, from, to) {
+  const inv = {};
+  const opex = {};
+  let unlinkedIn = 0;
+  [...txns].sort((a, b) => a.date.localeCompare(b.date)).forEach(t => {
+    if (t.type !== 'IN' && t.type !== 'OUT') return;
+    const key = invoiceKey(t.invoice);
+    if (key) {
+      const r = inv[key] ||= { key, invoice: String(t.invoice).trim(), firstDate: t.date, lastDate: t.date, sellAuto: 0, costAuto: 0, customer: '', entries: [] };
+      if (t.date > r.lastDate) r.lastDate = t.date;
+      if (t.type === 'IN') {
+        r.sellAuto += t.amount;
+        r.customer ||= t.description;
+      } else r.costAuto += t.amount;
+      r.entries.push({ id: t.id, date: t.date, type: t.type, description: t.description, category: t.category, amount: t.amount, method: t.method });
+      return;
+    }
+    if (t.date < from || t.date > to) return;
+    if (t.type === 'IN') unlinkedIn += t.amount;
+    else {
+      const c = t.category || 'Uncategorized';
+      const g = opex[c] ||= { name: c, total: 0, entries: [] };
+      g.total += t.amount;
+      g.entries.push({ id: t.id, date: t.date, description: t.description, amount: t.amount, method: t.method });
+    }
+  });
+  const round = n => Math.round(n * 100) / 100;
+  const invoices = Object.values(inv)
+    .filter(r => r.firstDate >= from && r.firstDate <= to)
+    .map(r => {
+      const o = overrides[r.key] || {};
+      const sellEdited = o.sell !== null && o.sell !== undefined;
+      const costEdited = o.cost !== null && o.cost !== undefined;
+      r.sellAuto = round(r.sellAuto);
+      r.costAuto = round(r.costAuto);
+      r.sell = sellEdited ? o.sell : r.sellAuto;
+      r.cost = costEdited ? o.cost : r.costAuto;
+      Object.assign(r, { sellEdited, costEdited, gross: round(r.sell - r.cost), editedBy: sellEdited || costEdited ? o.updatedBy || '' : '' });
+      return r;
+    })
+    .sort((a, b) => b.firstDate.localeCompare(a.firstDate) || a.invoice.localeCompare(b.invoice));
+  const categories = Object.values(opex).sort((a, b) => b.total - a.total);
+  const sumOf = list => round(list.reduce((a, b) => a + b, 0));
+  const totals = { sell: sumOf(invoices.map(r => r.sell)), cost: sumOf(invoices.map(r => r.cost)), opex: sumOf(categories.map(c => c.total)) };
+  totals.gross = round(totals.sell - totals.cost);
+  totals.net = round(totals.gross - totals.opex);
+  return { from, to, invoices, opex: categories, unlinkedIn: round(unlinkedIn), totals };
+}
+
+Object.assign(handlers, {
+  profit: ({ from, to }) => {
+    const s = settings();
+    return computeProfit(db.txns.filter(t => !s.startDate || t.date >= s.startDate), db.invoiceOverrides ||= {}, from, to);
+  },
+  saveInvoiceOverride: req => {
+    const key = invoiceKey(req.invoice);
+    if (!key) throw new Error('Invalid invoice number.');
+    const all = db.invoiceOverrides ||= {};
+    const old = all[key] || { sell: null, cost: null };
+    const parse = v => {
+      if (v === null || v === undefined || v === '') return null;
+      const n = r2(v);
+      if (!(n >= 0)) throw new Error('Prices cannot be negative.');
+      return n;
+    };
+    const next = { sell: 'sell' in req ? parse(req.sell) : old.sell, cost: 'cost' in req ? parse(req.cost) : old.cost };
+    if (next.sell === null && next.cost === null) delete all[key];
+    else all[key] = { ...next, updatedBy: me().name, updatedAt: localStamp() };
+    const label = v => (v === null ? 'auto' : v);
+    audit('edit', 'Invoices', key, `Invoice ${key}: sell ${label(next.sell)}, cost ${label(next.cost)}`,
+      { sell: label(old.sell), cost: label(old.cost) }, { sell: label(next.sell), cost: label(next.cost) });
+    return { invoice: key, ...next };
   },
 });
 

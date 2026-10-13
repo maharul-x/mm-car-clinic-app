@@ -19,6 +19,7 @@ const TABS = {
   PAY: { name: 'SalaryPayments', headers: ['id', 'date', 'employeeId', 'month', 'type', 'amount', 'method', 'note', 'txnId', 'source', 'createdAt', 'createdBy'] },
   USER: { name: 'Users', headers: ['id', 'username', 'name', 'passHash', 'status', 'isAdmin', 'perms', 'createdAt', 'approvedBy', 'lastLogin', 'sessionsFrom'] },
   AUDIT: { name: 'ChangeLog', headers: ['id', 'at', 'user', 'action', 'entity', 'recordId', 'summary', 'before', 'after'] },
+  INVOICE: { name: 'InvoiceOverrides', headers: ['invoice', 'sell', 'cost', 'updatedAt', 'updatedBy'] },
 };
 
 const DEFAULT_SETTINGS = {
@@ -47,7 +48,7 @@ const SETTING_KEYS = /^(businessName|address|phone|preparedBy|methods|startDate|
 const DATE_FIELDS = ['date', 'joinDate', 'createdAt', 'updatedAt', 'at', 'lastLogin'];
 
 // Parts of the app a user can be given access to. Each is 'none' (hidden), 'view' or 'edit'.
-const SECTIONS = ['cash', 'report', 'inventory', 'attendance', 'salary', 'employees', 'settings'];
+const SECTIONS = ['cash', 'report', 'profit', 'inventory', 'attendance', 'salary', 'employees', 'settings'];
 const LEVELS = ['none', 'view', 'edit'];
 const SESSION_TTL = 21600; // seconds of inactivity before sign-out (the Apps Script cache maximum, 6 h)
 const HASH_ROUNDS = 1000;
@@ -179,11 +180,13 @@ const API = {
   salaryMonth: (req, user) => salaryMonth_(req.month, user),
   saveAttendance: req => saveAttendance_(req.records),
   addSalaryPayment: req => addSalaryPayment_(req),
+  profit: req => profit_(req),
+  saveInvoiceOverride: req => saveInvoiceOverride_(req),
   deleteSalaryPayment: req => deleteSalaryPayment_(req.id),
 };
 const WRITES = ['addTxn', 'updateTxn', 'deleteTxn', 'saveSettings', 'saveCategories', 'saveItem', 'deleteItem', 'addMove', 'deleteMove',
   'saveEmployee', 'deleteEmployee', 'saveAttendance', 'addSalaryPayment', 'deleteSalaryPayment',
-  'signup', 'changePassword', 'updateUser', 'resetPassword'];
+  'signup', 'changePassword', 'updateUser', 'resetPassword', 'saveInvoiceOverride'];
 
 // Actions anyone can call without signing in.
 const PUBLIC = ['ping', 'login', 'signup'];
@@ -202,6 +205,7 @@ const RULES = {
   salaryMonth: [['attendance', 'salary'], 'view'],
   saveAttendance: [['attendance'], 'edit'],
   addSalaryPayment: [['salary'], 'edit'], deleteSalaryPayment: [['salary'], 'edit'],
+  profit: [['profit'], 'view'], saveInvoiceOverride: [['profit'], 'edit'],
 };
 
 function doGet() {
@@ -456,6 +460,7 @@ function updateUser_(admin, x) {
 const ENTITY_SECTION = {
   Transactions: 'cash', Inventory: 'inventory', StockMoves: 'inventory', Employees: 'employees',
   Attendance: 'attendance', SalaryPayments: 'salary', Settings: 'settings', Categories: 'settings', Users: 'admin',
+  Invoices: 'profit',
 };
 // Bookkeeping fields left out of the before/after snapshots.
 const AUDIT_SKIP = ['_row', 'createdAt', 'updatedAt', 'createdBy', 'updatedBy', 'passHash', 'sessionsFrom', 'source', 'lastLogin'];
@@ -1237,6 +1242,126 @@ function importSalarySheet() {
     audit_('add', 'SalaryPayments', 'import-' + month, 'Imported ' + people.length + ' employees and their advances for ' + month, null, null);
   });
   ui.alert('Imported ' + people.length + ' employees.');
+}
+
+// ───────────────────────────── Profit ─────────────────────────────
+
+/** "inv-000502 " and "INV-000502" are the same invoice. */
+function invoiceKey_(v) {
+  return String(v === undefined || v === null ? '' : v).trim().toUpperCase().replace(/\s+/g, '');
+}
+
+/** Manual sell/cost prices per invoice: { KEY: { sell, cost, updatedBy, updatedAt } }; null = use the calculated value. */
+function readOverrides_() {
+  const out = {};
+  readRows_(TABS.INVOICE).forEach(r => {
+    const num = v => (v === '' || v === null || v === undefined ? null : Number(v));
+    out[invoiceKey_(r.invoice)] = { sell: num(r.sell), cost: num(r.cost), updatedBy: String(r.updatedBy || ''), updatedAt: String(r.updatedAt || ''), _row: r._row };
+  });
+  return out;
+}
+
+function profit_(req) {
+  const from = str_(req.from, 10), to = str_(req.to, 10);
+  if (!isDate_(from) || !isDate_(to) || from > to) throw new Error('Invalid date range.');
+  const s = readSettings_();
+  const txns = readRows_(TABS.TXN).map(cleanTxn_).filter(t => !s.startDate || t.date >= s.startDate);
+  return computeProfit_(txns, readOverrides_(), from, to);
+}
+
+/**
+ * Pure profit maths (also copied into js/mock.js for the demo).
+ * - Sell price of an invoice = all cash in with that invoice number, on any date; cost price = all cash out with it.
+ * - An invoice belongs to the range that contains its first entry, so instalments never split it across months.
+ * - Operating expense = cash out with no invoice number, dated inside the range, grouped by category.
+ * - Net profit = total sell − total cost − operating expense. Transfers are ignored.
+ */
+function computeProfit_(txns, overrides, from, to) {
+  const inv = {};
+  const opex = {};
+  let unlinkedIn = 0;
+  txns.slice().sort((a, b) => a.date.localeCompare(b.date)).forEach(t => {
+    if (t.type !== 'IN' && t.type !== 'OUT') return;
+    const key = invoiceKey_(t.invoice);
+    if (key) {
+      const r = inv[key] || (inv[key] = { key: key, invoice: String(t.invoice).trim(), firstDate: t.date, lastDate: t.date, sellAuto: 0, costAuto: 0, customer: '', entries: [] });
+      if (t.date > r.lastDate) r.lastDate = t.date;
+      if (t.type === 'IN') {
+        r.sellAuto += t.amount;
+        if (!r.customer) r.customer = t.description;
+      } else {
+        r.costAuto += t.amount;
+      }
+      r.entries.push({ id: t.id, date: t.date, type: t.type, description: t.description, category: t.category, amount: t.amount, method: t.method });
+      return;
+    }
+    if (t.date < from || t.date > to) return;
+    if (t.type === 'IN') unlinkedIn += t.amount;
+    else {
+      const c = t.category || 'Uncategorized';
+      const g = opex[c] || (opex[c] = { name: c, total: 0, entries: [] });
+      g.total += t.amount;
+      g.entries.push({ id: t.id, date: t.date, description: t.description, amount: t.amount, method: t.method });
+    }
+  });
+  const round = n => Math.round(n * 100) / 100;
+  const invoices = Object.keys(inv).map(k => inv[k])
+    .filter(r => r.firstDate >= from && r.firstDate <= to)
+    .map(r => {
+      const o = overrides[r.key] || {};
+      const sellEdited = o.sell !== null && o.sell !== undefined;
+      const costEdited = o.cost !== null && o.cost !== undefined;
+      r.sellAuto = round(r.sellAuto);
+      r.costAuto = round(r.costAuto);
+      r.sell = sellEdited ? o.sell : r.sellAuto;
+      r.cost = costEdited ? o.cost : r.costAuto;
+      r.sellEdited = sellEdited;
+      r.costEdited = costEdited;
+      r.gross = round(r.sell - r.cost);
+      r.editedBy = sellEdited || costEdited ? o.updatedBy || '' : '';
+      return r;
+    })
+    .sort((a, b) => b.firstDate.localeCompare(a.firstDate) || a.invoice.localeCompare(b.invoice));
+  const categories = Object.keys(opex).map(k => opex[k]).sort((a, b) => b.total - a.total);
+  const sum = list => round(list.reduce((a, b) => a + b, 0));
+  const totals = {
+    sell: sum(invoices.map(r => r.sell)),
+    cost: sum(invoices.map(r => r.cost)),
+    opex: sum(categories.map(c => c.total)),
+  };
+  totals.gross = round(totals.sell - totals.cost);
+  totals.net = round(totals.gross - totals.opex);
+  return { from: from, to: to, invoices: invoices, opex: categories, unlinkedIn: round(unlinkedIn), totals: totals };
+}
+
+/** Sets or clears (null) the manual sell/cost price of one invoice. */
+function saveInvoiceOverride_(req) {
+  const key = invoiceKey_(req.invoice);
+  if (!key || key.length > 40) throw new Error('Invalid invoice number.');
+  const parse = (v, label) => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = num_(v);
+    if (!(n >= 0)) throw new Error(label + ' cannot be negative.');
+    return n;
+  };
+  const all = readOverrides_();
+  const old = all[key] || { sell: null, cost: null };
+  const next = {
+    sell: 'sell' in req ? parse(req.sell, 'Sell price') : old.sell,
+    cost: 'cost' in req ? parse(req.cost, 'Cost price') : old.cost,
+  };
+  const sh = sheet_(TABS.INVOICE);
+  if (next.sell === null && next.cost === null) {
+    if (old._row) sh.deleteRow(old._row);
+  } else {
+    const row = toRow_(TABS.INVOICE, { invoice: key, sell: next.sell === null ? '' : next.sell, cost: next.cost === null ? '' : next.cost, updatedAt: new Date(), updatedBy: actorName_() });
+    if (old._row) sh.getRange(old._row, 1, 1, row.length).setValues([row]);
+    else sh.appendRow(row);
+  }
+  const label = v => (v === null ? 'auto' : v);
+  audit_('edit', 'Invoices', key, 'Invoice ' + key + ': sell ' + label(next.sell) + ', cost ' + label(next.cost),
+    { sell: label(old.sell), cost: label(old.cost) }, { sell: label(next.sell), cost: label(next.cost) });
+  return { invoice: key, sell: next.sell, cost: next.cost };
 }
 
 // ───────────────────────────── Import old daily sheets ─────────────────────────────

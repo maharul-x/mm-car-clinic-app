@@ -3,7 +3,7 @@ import { esc, loading, options } from '../util.js';
 import { historyList } from './history.js';
 
 const ENTITIES = [
-  ['', 'Everything'], ['Transactions', 'Cash book'], ['Inventory', 'Inventory'], ['StockMoves', 'Stock movements'],
+  ['', 'Everything'], ['Transactions', 'Cash book'], ['Invoices', 'Invoice prices'], ['Inventory', 'Inventory'], ['StockMoves', 'Stock movements'],
   ['Attendance', 'Attendance'], ['SalaryPayments', 'Salary payments'], ['Employees', 'Employees'],
   ['Settings', 'Settings'], ['Categories', 'Categories'], ['Users', 'Users'],
 ];

@@ -627,3 +627,30 @@ fieldset.plain:disabled input, fieldset.plain:disabled select, fieldset.plain:di
   .table.stacked td > .cell .chip { margin: 2px 0 0 6px; }
   .table.stacked td > .cell .block, .table.stacked td > .cell .by, .table.stacked td > .cell .note { text-align: right; }
 }
+
+/* ── Profit ── */
+.range-picker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.custom-range { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.custom-range input { width: auto; }
+.panel-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 14px; }
+.panel-head h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.panel-head input[type="search"] { max-width: 260px; }
+.chip.edited { color: var(--accent); border-color: transparent; background: var(--accent-soft); }
+.card strong.neg, .sum-list dd.neg, .gross-line strong.neg, .table .num.neg { color: var(--neg); }
+.table .num.pos { color: var(--pos); }
+.sum-list { margin: 0; display: flex; flex-direction: column; max-width: 460px; }
+.sum-list > div { display: flex; justify-content: space-between; gap: 16px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13.5px; }
+.sum-list dt { color: var(--muted); }
+.sum-list dd { margin: 0; font-variant-numeric: tabular-nums; font-weight: 500; }
+.sum-list .sum-total { border-bottom: 0; border-top: 1px solid var(--border-strong); margin-top: 4px; padding-top: 12px; font-size: 16px; }
+.sum-list .sum-total dt { color: var(--text); font-weight: 600; }
+.sum-list .sum-total dd { font-weight: 600; }
+.price-field p { margin: 6px 0 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.gross-line { margin: 0; font-size: 14px; color: var(--muted); }
+.gross-line strong { color: var(--text); font-size: 16px; margin-left: 6px; }
+.sub-title { margin: 22px 0 8px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+@media (max-width: 900px) {
+  .panel-head input[type="search"] { max-width: none; }
+  .range-picker, .custom-range { width: 100%; }
+  .custom-range input { flex: 1; }
+}

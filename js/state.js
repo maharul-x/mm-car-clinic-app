@@ -20,6 +20,7 @@ export const methodLabel = m => (m === 'Cash' ? 'Cash in hand' : m === 'Bkash' ?
 export const SECTIONS = [
   ['cash', 'Cash book'],
   ['report', 'Monthly report'],
+  ['profit', 'Profit'],
   ['inventory', 'Inventory'],
   ['attendance', 'Attendance'],
   ['salary', 'Salary sheet'],

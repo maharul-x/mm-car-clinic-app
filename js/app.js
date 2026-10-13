@@ -6,6 +6,7 @@ import { renderInventory } from './views/inventory.js';
 import { renderLogin } from './views/login.js';
 import { renderMonth } from './views/month.js';
 import { renderOverview } from './views/overview.js';
+import { renderProfit } from './views/profit.js';
 import { installShortcuts, modKey, openCommandMenu } from './shortcuts.js';
 import { applyTheme, cycleTheme } from './theme.js';
 import { renderSalary } from './views/salary.js';
@@ -14,7 +15,7 @@ import { renderUsers } from './views/users.js';
 import { renderActivity } from './views/activity.js';
 
 const ROUTES = {
-  overview: renderOverview, day: renderDay, month: renderMonth, inventory: renderInventory, salary: renderSalary,
+  overview: renderOverview, day: renderDay, month: renderMonth, profit: renderProfit, inventory: renderInventory, salary: renderSalary,
   settings: renderSettings, users: renderUsers, activity: renderActivity,
 };
 // Who may open each page. The server enforces the same rules on every request; this only hides what you can't use.
@@ -22,6 +23,7 @@ const ACCESS = {
   overview: () => true,
   day: () => can('cash'),
   month: () => can('report'),
+  profit: () => can('profit'),
   inventory: () => can('inventory'),
   salary: () => can(['attendance', 'salary', 'employees']),
   settings: () => true,

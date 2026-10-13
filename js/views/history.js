@@ -8,10 +8,10 @@ const LABELS = {
   phone: 'Phone', joinDate: 'Joining date', trackAttendance: 'Tracks attendance', status: 'Status', isAdmin: 'Admin',
   perms: 'Access', qty: 'Quantity', unitPrice: 'Unit price', reference: 'Reference', month: 'Month', employee: 'Employee',
   username: 'Username', IN: 'Cash-in categories', OUT: 'Cash-out categories', methods: 'Payment methods', startDate: 'First day tracked',
-  weeklyOff: 'Weekly off', businessName: 'Business name', address: 'Address', preparedBy: 'Prepared by',
+  weeklyOff: 'Weekly off', sell: 'Sell price', cost: 'Cost price', businessName: 'Business name', address: 'Address', preparedBy: 'Prepared by',
 };
 const HIDDEN = ['id', 'itemId', 'employeeId', 'txnId', 'sortOrder', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt', 'approvedBy', 'lastLogin'];
-const SECTION = { cash: 'Cash book', report: 'Monthly report', inventory: 'Inventory', attendance: 'Attendance', salary: 'Salary sheet', employees: 'Employees', settings: 'Settings' };
+const SECTION = { cash: 'Cash book', report: 'Monthly report', profit: 'Profit', inventory: 'Inventory', attendance: 'Attendance', salary: 'Salary sheet', employees: 'Employees', settings: 'Settings' };
 const LEVEL = { none: 'Hidden', view: 'View', edit: 'View & edit' };
 const ATT = { P: 'Present', A: 'Absent', L: 'Paid leave', O: 'Off', '': 'Not marked' };
 const ACTION = { add: 'Added', edit: 'Edited', delete: 'Deleted' };

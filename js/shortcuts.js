@@ -16,6 +16,7 @@ export const SHORTCUTS = [
   { id: 'overview', label: 'Go to Overview', keys: ['G', 'H'], run: go('#/overview') },
   { id: 'day', label: 'Go to Daily ledger', keys: ['G', 'D'], showOnOverview: true, allowed: () => can('cash'), run: go('#/day') },
   { id: 'month', label: 'Go to Monthly report', keys: ['G', 'M'], allowed: () => can('report'), run: go('#/month') },
+  { id: 'profit', label: 'Go to Profit', keys: ['G', 'P'], allowed: () => can('profit'), run: go('#/profit') },
   { id: 'inventory', label: 'Go to Inventory', keys: ['G', 'I'], allowed: () => can('inventory'), run: go('#/inventory') },
   { id: 'attendance', label: 'Go to Attendance', keys: ['G', 'A'], showOnOverview: true, allowed: () => can('attendance'), run: go('#/salary/attendance') },
   { id: 'sheet', label: 'Go to Salary sheet', keys: ['G', 'S'], allowed: () => can('salary'), run: go('#/salary/sheet') },
