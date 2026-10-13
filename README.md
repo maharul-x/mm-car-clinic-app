@@ -13,7 +13,7 @@ Phone / PC browser ──► GitHub Pages (this repo) ──► Apps Script web 
 
 | Screen | |
 |---|---|
-| **Daily** | Cash in / cash out / transfers for one day, opening and closing balance, closing balance by account (Cash in hand, Bank, bKash). Print gives the same layout as the old paper ledger. |
+| **Daily** | Cash in / cash out / transfers for one day, opening and closing balance, closing balance by account (Cash in hand, Bank, bKash). A cash out with category **Salary** can be linked to an employee, a salary month and Advance / Salary payment: it then also appears on that employee's salary sheet and stays in step when edited or deleted. Print gives the same layout as the old paper ledger. |
 | **Monthly** | Totals for the month, expenses and income by category (click a category to see every entry), day-by-day closing, month-end balance per account, CSV download. |
 | **Profit** | Per invoice: sell price (all cash in with that invoice number, on any date, so instalments add up automatically), cost price (all cash out with it) and gross profit. Open an invoice to add, edit or delete *invoice-only* cash in / cash out lines: they count for that invoice's prices but are not in the cash book and don't change any balance. Operating expenses = cash out without an invoice number, by category. Net profit = sell − cost − operating expense, for this month, last month or any date range. An invoice is counted in the period of its first entry. |
 | **Inventory** | Parts and consumables with stock level, low-stock warnings, stock in / out / adjust, history. Stock bought or sold can be recorded in the cash book at the same time. |

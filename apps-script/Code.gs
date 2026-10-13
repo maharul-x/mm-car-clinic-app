@@ -162,9 +162,9 @@ const API = {
   changeLog: req => changeLog_(req),
   history: (req, user) => history_(user, req),
   meta: () => ({ settings: readSettings_(), categories: readCategories_() }),
-  range: req => range_(req.from, req.to),
-  addTxn: req => saveTxn_(req.txn, false),
-  updateTxn: req => saveTxn_(req.txn, true),
+  range: (req, user) => range_(req.from, req.to, user),
+  addTxn: req => saveTxnWithSalary_(req, false),
+  updateTxn: req => saveTxnWithSalary_(req, true),
   deleteTxn: req => deleteTxn_(req.id),
   saveSettings: req => saveSettings_(req.settings),
   saveCategories: req => saveCategories_(req.categories),
@@ -296,6 +296,8 @@ function authorize_(user, action, req) {
   if (!can_(user, rule[0], rule[1])) deny();
   // Actions that also write a cash-book entry need cash-book edit access too.
   if ((action === 'addMove' || action === 'addSalaryPayment') && req.cash && !can_(user, ['cash'], 'edit')) deny();
+  // Linking a cash-book entry to an employee's salary changes the salary sheet too.
+  if ((action === 'addTxn' || action === 'updateTxn') && req.salary && !can_(user, ['salary'], 'edit')) deny();
 }
 
 /** Basic salary is visible only to people with salary or employee access. */
@@ -553,7 +555,7 @@ function changeLog_(req) {
 
 // ───────────────────────────── Cash book ─────────────────────────────
 
-function range_(from, to) {
+function range_(from, to, user) {
   if (!isDate_(from) || !isDate_(to) || from > to) throw new Error('Invalid date range.');
   const s = readSettings_();
   const opening = {};
@@ -565,6 +567,17 @@ function range_(from, to) {
     else if (t.date <= to) txns.push(t);
   });
   txns.sort((a, b) => a.date.localeCompare(b.date) || a.createdAt.localeCompare(b.createdAt));
+  // Salary cash-outs linked to an employee carry who and which month (only for people who may see salaries).
+  if (!user || can_(user, ['salary'], 'view')) {
+    const links = {};
+    const names = {};
+    readRows_(TABS.PAY).forEach(p => { if (p.txnId) links[String(p.txnId)] = p; });
+    if (Object.keys(links).length) employees_().forEach(e => { names[e.id] = e.name; });
+    txns.forEach(t => {
+      const p = links[t.id];
+      if (p) t.salary = { employeeId: String(p.employeeId), employee: names[p.employeeId] || '', month: String(p.month), type: String(p.type).toUpperCase() };
+    });
+  }
   return { from: from, to: to, opening: opening, txns: txns };
 }
 
@@ -645,7 +658,85 @@ function deleteTxn_(id) {
   const old = cleanTxn_(readRow_(TABS.TXN, row));
   sheet_(TABS.TXN).deleteRow(row);
   audit_('delete', 'Transactions', id, txnLabel_(old), old, null);
+  unlinkSalary_(id); // the money was never paid, so take it off the salary sheet too
   return { deleted: true };
+}
+
+// ───────────────────────────── Cash book ↔ salary sheet ─────────────────────────────
+
+const isSalaryCategory_ = c => String(c || '').trim().toLowerCase() === 'salary';
+
+/**
+ * Saves a cash-book entry, then keeps its salary-sheet payment in step.
+ * req.salary = { employeeId, month, type } links it to an employee; null unlinks; undefined keeps any existing link.
+ */
+function saveTxnWithSalary_(req, isUpdate) {
+  const sal = req.salary;
+  if (sal && sal.employeeId) {
+    // Check the salary details first, so a mistake doesn't leave a cash entry saved without its link.
+    if (!/^\d{4}-\d{2}$/.test(String(sal.month || ''))) throw new Error('Choose the salary month.');
+    if (PAY_TYPES.indexOf(String(sal.type || 'ADVANCE').toUpperCase()) < 0) throw new Error('Choose advance or salary payment.');
+    findRow_(TABS.EMP, str_(sal.employeeId, 64));
+  }
+  const res = saveTxn_(req.txn, isUpdate);
+  syncSalaryLink_(res.id, req.salary);
+  return res;
+}
+
+function syncSalaryLink_(txnId, salary) {
+  const t = cleanTxn_(readRow_(TABS.TXN, findRow_(TABS.TXN, txnId)));
+  const link = readRows_(TABS.PAY).find(p => String(p.txnId) === txnId);
+  let want;
+  if (t.type !== 'OUT' || !isSalaryCategory_(t.category)) want = false; // no longer a salary cash-out
+  else if (salary === undefined) want = !!link;
+  else want = !!(salary && salary.employeeId);
+  if (!want) {
+    if (link) unlinkSalary_(txnId);
+    return;
+  }
+  const pick = salary || { employeeId: link.employeeId, month: link.month, type: link.type };
+  const p = {
+    date: t.date,
+    employeeId: str_(pick.employeeId, 64),
+    month: str_(pick.month, 7),
+    type: str_(pick.type, 10).toUpperCase() || 'ADVANCE',
+    amount: t.amount,
+    method: t.method,
+    note: link ? String(link.note) : 'From cash book',
+    txnId: txnId,
+    source: link ? String(link.source) : 'cash',
+  };
+  if (!/^\d{4}-\d{2}$/.test(p.month)) throw new Error('Choose the salary month.');
+  if (PAY_TYPES.indexOf(p.type) < 0) throw new Error('Choose advance or salary payment.');
+  const emp = cleanEmp_(readRow_(TABS.EMP, findRow_(TABS.EMP, p.employeeId)));
+  const sh = sheet_(TABS.PAY);
+  if (link) {
+    const before = cleanPay_(link);
+    p.id = String(link.id);
+    p.createdAt = link.createdAt;
+    p.createdBy = link.createdBy;
+    const changed = ['date', 'employeeId', 'month', 'type', 'amount', 'method'].some(k => String(before[k]) !== String(p[k]));
+    if (!changed) return;
+    sh.getRange(link._row, 1, 1, TABS.PAY.headers.length).setValues([toRow_(TABS.PAY, p)]);
+    audit_('edit', 'SalaryPayments', p.id, payLabel_(p, emp.name) + ' (from cash book)', before, Object.assign({ employee: emp.name }, p));
+  } else {
+    p.id = Utilities.getUuid();
+    p.createdAt = new Date();
+    p.createdBy = actorName_();
+    sh.appendRow(toRow_(TABS.PAY, p));
+    audit_('add', 'SalaryPayments', p.id, payLabel_(p, emp.name) + ' (from cash book)', null, Object.assign({ employee: emp.name }, p));
+  }
+}
+
+/** Removes the salary-sheet payment linked to a cash-book entry, if there is one. */
+function unlinkSalary_(txnId) {
+  const link = readRows_(TABS.PAY).find(p => String(p.txnId) === String(txnId));
+  if (!link) return;
+  const old = cleanPay_(link);
+  let name = old.employeeId;
+  try { name = cleanEmp_(readRow_(TABS.EMP, findRow_(TABS.EMP, old.employeeId))).name; } catch (e) { /* employee gone */ }
+  sheet_(TABS.PAY).deleteRow(link._row);
+  audit_('delete', 'SalaryPayments', old.id, 'Removed ' + payLabel_(old, name).toLowerCase() + ' (cash-book entry changed or deleted)', Object.assign({ employee: name }, old), null);
 }
 
 function cleanTxn_(r) {

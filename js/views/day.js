@@ -155,6 +155,7 @@ function ledgerTable(title, rows, total, kind) {
               <td class="nowrap">${esc(t.invoice)}</td>
               <td>${esc(t.description)}
                 <span class="chip${t.category === 'Uncategorized' ? ' warn' : ''}">${esc(t.category)}</span>
+                ${t.salary ? `<small class="note salary-note">→ ${esc(t.salary.employee)} · ${esc(prettyDate(`${t.salary.month}-01`, { month: 'short', year: 'numeric' }))} ${t.salary.type === 'ADVANCE' ? 'advance' : 'salary'}</small>` : ''}
                 ${t.note ? `<small class="note">${esc(t.note)}</small>` : ''}
                 ${byLine(t)}
               </td>

@@ -1,9 +1,22 @@
 import { call } from '../api.js';
 import { can, categories, methodLabel, methods } from '../state.js';
-import { confirmDialog, esc, formError, openModal, options, submitting, taka, toast } from '../util.js';
+import { confirmDialog, esc, formError, openModal, options, prettyMonth, submitting, taka, toast } from '../util.js';
 import { loadHistory, stampLine } from './history.js';
 
 const TITLES = { IN: 'Cash in', OUT: 'Cash out', TRANSFER: 'Move money between accounts' };
+const MONTHS = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'];
+const isSalary = c => String(c || '').trim().toLowerCase() === 'salary';
+const salaryDescription = (name, month, type) =>
+  `${name.toUpperCase()} ${MONTHS[Number(month.slice(5, 7)) - 1]} ${type === 'ADVANCE' ? 'ADV' : 'SALARY'} (SALARY)`;
+
+// Employee list for the salary fields, fetched once per minute at most.
+let staffCache = { at: 0, list: null };
+async function staff() {
+  if (!staffCache.list || Date.now() - staffCache.at > 60000) {
+    staffCache = { at: Date.now(), list: (await call('employees')).filter(e => e.active).sort((a, b) => a.name.localeCompare(b.name)) };
+  }
+  return staffCache.list;
+}
 
 /**
  * Add, edit or (for view-only users) look at one cash-book entry, with who added/edited it and its full history.
@@ -17,6 +30,27 @@ export function openTxnForm({ type, date, txn, onSaved }) {
   const cats = [...categories(type)];
   const t = txn || { date, type, method: ms[0], toMethod: ms[1] || ms[0], category: type === 'IN' ? cats[0] : '' };
   if (t.category && type !== 'TRANSFER' && !cats.includes(t.category)) cats.push(t.category);
+  // Salary cash-outs can be linked to an employee and month, which also records it on the salary sheet.
+  const canLink = type === 'OUT' && !readOnly && can('salary', 'edit');
+  const link = t.salary || null;
+  const salaryFields = !canLink ? (link ? `
+      <p class="salary-linked">Paid to <strong>${esc(link.employee)}</strong> · ${esc(prettyMonth(link.month))} ${link.type === 'ADVANCE' ? 'advance' : 'salary'} · on the salary sheet</p>` : '') : `
+      <fieldset class="salary-link" ${isSalary(t.category) ? '' : 'hidden'}>
+        <legend>Salary payment</legend>
+        <label>Employee
+          <select name="employeeId"><option value="">Loading…</option></select>
+        </label>
+        <div class="grid2" data-salary-more>
+          <label>Salary for month<input type="month" name="salaryMonth" value="${esc(link?.month || String(t.date || '').slice(0, 7))}"></label>
+          <label>Type
+            <select name="salaryType">
+              <option value="ADVANCE" ${link?.type === 'SALARY' ? '' : 'selected'}>Advance</option>
+              <option value="SALARY" ${link?.type === 'SALARY' ? 'selected' : ''}>Salary payment</option>
+            </select>
+          </label>
+        </div>
+        <p class="muted small" data-salary-hint></p>
+      </fieldset>`;
 
   const methodField = type === 'TRANSFER'
     ? `<div class="grid2">
@@ -46,6 +80,7 @@ export function openTxnForm({ type, date, txn, onSaved }) {
               </select>
             </label>`}
         </div>
+        ${salaryFields}
         ${methodField}
         <div class="grid2">
           <label>Date<input type="date" name="date" required value="${esc(t.date)}"></label>
@@ -75,8 +110,10 @@ export function openTxnForm({ type, date, txn, onSaved }) {
   });
 
   const form = m.el.querySelector('form');
+  const sal = canLink ? wireSalaryFields(form, t, link) : null;
   form.querySelector('[data-delete]')?.addEventListener('click', async () => {
-    if (!(await confirmDialog(`Delete "${t.description}" (${taka(t.amount)})? This cannot be undone.`))) return;
+    const extra = link ? ` It is also removed from ${link.employee}'s salary sheet.` : '';
+    if (!(await confirmDialog(`Delete "${t.description}" (${taka(t.amount)})? This cannot be undone.${extra}`))) return;
     const ok = await submitting(form, () => call('deleteTxn', { id: t.id }));
     if (!ok) return;
     toast('Entry deleted');
@@ -95,14 +132,82 @@ export function openTxnForm({ type, date, txn, onSaved }) {
     if (type === 'OUT' && !v.category) return formError(form, 'Choose a category.');
     if (type === 'TRANSFER' && v.method === v.toMethod) return formError(form, 'Choose two different accounts.');
 
-    const payload = { ...t, ...v, type, amount };
-    const saved = await submitting(form, () => call(editing ? 'updateTxn' : 'addTxn', { txn: payload }));
+    const { employeeId, salaryMonth, salaryType, ...fields } = v;
+    const payload = { ...t, ...fields, type, amount };
+    delete payload.salary;
+    const req = { txn: payload };
+    if (sal) {
+      if (isSalary(v.category) && employeeId) {
+        if (!/^\d{4}-\d{2}$/.test(salaryMonth || '')) return formError(form, 'Choose the salary month.');
+        req.salary = { employeeId, month: salaryMonth, type: salaryType };
+      } else if (link) req.salary = null;
+    }
+    const saved = await submitting(form, () => call(editing ? 'updateTxn' : 'addTxn', req));
     if (!saved) return;
-    toast(editing ? 'Entry updated' : 'Entry saved');
+    const who = req.salary ? sal.name(employeeId) : '';
+    toast(who ? `Saved and added to ${who}'s salary sheet` : editing ? 'Entry updated' : 'Entry saved');
     onSaved?.();
     if (!again) return m.close();
     ['amount', 'description', 'invoice', 'note'].forEach(n => { if (form.elements[n]) form.elements[n].value = ''; });
     if (type === 'OUT') form.elements.category.value = '';
+    sal?.reset();
     (form.elements.description || form.elements.amount).focus();
   });
+}
+
+/** Shows the salary fields when the category is Salary, fills the employee list and suggests a description. */
+function wireSalaryFields(form, t, link) {
+  const box = form.querySelector('.salary-link');
+  const els = form.elements;
+  const hint = box.querySelector('[data-salary-hint]');
+  const more = box.querySelector('[data-salary-more]');
+  let list = [];
+  let autoDesc = '';
+  const name = id => list.find(e => e.id === id)?.name || link?.employee || '';
+  const sync = () => {
+    box.hidden = !isSalary(els.category.value);
+    const id = els.employeeId.value;
+    more.hidden = !id;
+    const month = els.salaryMonth.value;
+    hint.textContent = id
+      ? `Also recorded on ${name(id)}'s salary sheet for ${/^\d{4}-\d{2}$/.test(month) ? prettyMonth(month) : 'that month'} as ${els.salaryType.value === 'ADVANCE' ? 'an advance' : 'a salary payment'}.`
+      : 'Pick an employee to record this on their salary sheet, or leave it for other salary costs (e.g. lunch bill).';
+    // Suggest "RUBEL OCT ADV (SALARY)" unless the description was typed by hand.
+    if (id && /^\d{4}-\d{2}$/.test(month) && (!els.description.value.trim() || els.description.value === autoDesc)) {
+      autoDesc = salaryDescription(name(id), month, els.salaryType.value);
+      els.description.value = autoDesc;
+    }
+  };
+  ['change', 'input'].forEach(ev => {
+    els.category.addEventListener(ev, sync);
+    els.employeeId.addEventListener(ev, sync);
+    els.salaryMonth.addEventListener(ev, sync);
+    els.salaryType.addEventListener(ev, sync);
+  });
+  els.date.addEventListener('change', () => {
+    if (!els.employeeId.value && /^\d{4}-\d{2}-\d{2}$/.test(els.date.value)) els.salaryMonth.value = els.date.value.slice(0, 7);
+  });
+  staff().then(rows => {
+    list = rows;
+    const current = link?.employeeId || '';
+    const known = list.some(e => e.id === current);
+    els.employeeId.innerHTML = '<option value="">— Not for a specific employee —</option>' +
+      list.map(e => `<option value="${esc(e.id)}" ${e.id === current ? 'selected' : ''}>${esc(e.name)}${e.designation ? ` · ${esc(e.designation)}` : ''}</option>`).join('') +
+      (current && !known ? `<option value="${esc(current)}" selected>${esc(link.employee)} (former)</option>` : '');
+    // Keep updating the description only if it is still the one we suggested.
+    autoDesc = link && t.description === salaryDescription(link.employee, link.month, link.type) ? t.description : '';
+    sync();
+  }).catch(err => {
+    els.employeeId.innerHTML = '<option value="">Could not load employees</option>';
+    hint.textContent = err.message;
+  });
+  sync();
+  return {
+    name,
+    reset() {
+      els.employeeId.value = '';
+      autoDesc = '';
+      sync();
+    },
+  };
 }

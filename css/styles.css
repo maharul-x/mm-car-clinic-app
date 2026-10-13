@@ -656,3 +656,11 @@ fieldset.plain:disabled input, fieldset.plain:disabled select, fieldset.plain:di
   .range-picker, .custom-range { width: 100%; }
   .custom-range input { flex: 1; }
 }
+
+/* ── Salary fields on a cash-out ── */
+.salary-link { background: var(--bg); }
+.salary-link legend { padding: 0 6px; font-size: 11px; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); }
+.salary-link p { margin: 0; }
+.salary-linked { margin: 0; padding: 9px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: 13px; color: var(--muted); }
+.salary-linked strong { color: var(--text); font-weight: 500; }
+.salary-note { color: var(--accent) !important; }

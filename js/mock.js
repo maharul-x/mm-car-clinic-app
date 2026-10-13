@@ -1,7 +1,7 @@
 // In-browser stand-in for the Apps Script server, used by "Try the demo".
 // Data lives in this browser only. The sample data is made up.
 
-const KEY = 'mm.demo.v11';
+const KEY = 'mm.demo.v12';
 let db = null;
 
 const uid = () => (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
@@ -417,6 +417,7 @@ function authorize(action, p) {
   if (rule === 'admin') { if (!u.isAdmin) throw forbidden(); return; }
   if (!canDo(u, rule[0], rule[1])) throw forbidden();
   if ((action === 'addMove' || action === 'addSalaryPayment') && p.cash && !canDo(u, ['cash'], 'edit')) throw forbidden();
+  if ((action === 'addTxn' || action === 'updateTxn') && p.salary && !canDo(u, ['salary'], 'edit')) throw forbidden();
 }
 
 const txnLabel = t => `${{ IN: 'Cash in', OUT: 'Cash out', TRANSFER: 'Transfer' }[t.type]}: ${t.description} ৳${t.amount} (${t.date})`;
@@ -658,6 +659,64 @@ Object.assign(handlers, {
     const key = invoiceKey(invoice);
     const ids = new Set(db.txns.filter(t => invoiceKey(t.invoice) === key).map(t => t.id));
     return db.audit.filter(a => (a.entity === 'Invoices' && a.recordId === key) || (a.entity === 'Transactions' && ids.has(a.recordId))).slice().reverse();
+  },
+});
+
+// ───────────── Cash book ↔ salary sheet (same rules as syncSalaryLink_ in Code.gs) ─────────────
+
+const isSalaryCat = c => String(c || '').trim().toLowerCase() === 'salary';
+
+function unlinkSalary(txnId) {
+  const i = db.payments.findIndex(p => p.txnId === txnId);
+  if (i < 0) return;
+  const [old] = db.payments.splice(i, 1);
+  const emp = db.employees.find(e => e.id === old.employeeId);
+  audit('delete', 'SalaryPayments', old.id, `Removed ${old.type === 'ADVANCE' ? 'advance' : 'salary'} to ${emp?.name} (cash-book entry changed or deleted)`, { employee: emp?.name, ...old }, null);
+}
+
+function syncSalary(txnId, salary) {
+  const t = db.txns.find(x => x.id === txnId);
+  const link = db.payments.find(p => p.txnId === txnId);
+  let want;
+  if (!t || t.type !== 'OUT' || !isSalaryCat(t.category)) want = false;
+  else if (salary === undefined) want = !!link;
+  else want = !!(salary && salary.employeeId);
+  if (!want) return unlinkSalary(txnId);
+  const pick = salary || link;
+  const p = { date: t.date, employeeId: pick.employeeId, month: pick.month, type: String(pick.type || 'ADVANCE').toUpperCase(), amount: t.amount, method: t.method, txnId };
+  const emp = db.employees[find(db.employees, p.employeeId)];
+  if (link) {
+    const before = { ...link };
+    Object.assign(link, p);
+    audit('edit', 'SalaryPayments', link.id, `${p.type === 'ADVANCE' ? 'Advance' : 'Salary'} to ${emp.name} ৳${p.amount} for ${p.month} (from cash book)`, before, { employee: emp.name, ...link });
+  } else {
+    const row = { ...p, id: uid(), note: 'From cash book', source: 'cash', createdBy: me().name };
+    db.payments.push(row);
+    audit('add', 'SalaryPayments', row.id, `${p.type === 'ADVANCE' ? 'Advance' : 'Salary'} to ${emp.name} ৳${p.amount} for ${p.month} (from cash book)`, null, { employee: emp.name, ...row });
+  }
+}
+
+const checkSalary = s => {
+  if (!s || !s.employeeId) return;
+  if (!/^\d{4}-\d{2}$/.test(String(s.month || ''))) throw new Error('Choose the salary month.');
+  find(db.employees, s.employeeId);
+};
+const prevTxn = { add: handlers.addTxn, update: handlers.updateTxn, del: handlers.deleteTxn, range: handlers.range };
+Object.assign(handlers, {
+  addTxn: p => { checkSalary(p.salary); const res = prevTxn.add(p); syncSalary(res.id, p.salary); return res; },
+  updateTxn: p => { checkSalary(p.salary); const res = prevTxn.update(p); syncSalary(p.txn.id, p.salary); return res; },
+  deleteTxn: p => { const res = prevTxn.del(p); unlinkSalary(p.id); return res; },
+  range: p => {
+    const out = prevTxn.range(p);
+    if (canDo(me(), ['salary'], 'view')) {
+      out.txns = out.txns.map(t => {
+        const link = db.payments.find(x => x.txnId === t.id);
+        if (!link) return t;
+        const emp = db.employees.find(e => e.id === link.employeeId);
+        return { ...t, salary: { employeeId: link.employeeId, employee: emp?.name || '', month: link.month, type: link.type } };
+      });
+    }
+    return out;
   },
 });
 
